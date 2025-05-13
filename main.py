@@ -97,7 +97,20 @@ if __name__ == '__main__':
 			if len(kd) == 0:
 				sys.stderr.write(f"\nkeyring file {parser.KEYRING_FILE} is not correct\n\n")
 				sys.exit(11)
-		# 读ibd的fsp中的key和iv
+	ddcw.MYSQL5 = parser.MYSQL5
+	# 自动判断是否为mysql5环境
+	if os.path.exists(filename[:-4]+'.frm'):
+		AUTOFRM = True
+		FRMFILENAME = filename[:-4]+'.frm'
+		ddcw.MYSQL5 = True
+	elif os.path.exists(filename.split('#')[0]+'.frm'): # 5.7的分区表
+		AUTOFRM = True
+		FRMFILENAME = filename.split('#')[0]+'.frm'
+		ddcw.MYSQL5 = True
+	else:
+		AUTOFRM = False
+
+	# 读ibd的fsp中的key和iv
 	with open(filename,'rb') as f:
 		fsp = f.read(16384)
 		if len(fsp) != 16384:
@@ -110,15 +123,16 @@ if __name__ == '__main__':
 		if data != b'\x00'*115:
 			ddcw.ENCRYPTED = True # 表示有加密
 			master_id = struct.unpack('>L',data[3:7])[0]
-			server_uuid = data[7:7+36].decode()
+			server_uuid = data[7+4:7+4+36].decode() if ddcw.MYSQL5 else data[7:7+36].decode()
 			kid = 'INNODBKey'+'-'+server_uuid+'-'+str(master_id)
 			if kid not in kd:
 				sys.stderr.write(f"\n ibd'key not in keyring file({parser.KEYRING_FILE})\n\n")
 				sys.exit(13)
 			master_key = kd['INNODBKey'+'-'+server_uuid+'-'+str(master_id)]['key']
-			key_info = AES.aes_ecb256_decrypt(master_key,data[43:43+32*2])
+			key_info = AES.aes_ecb256_decrypt(master_key,data[43+4:43+4+32*2]) if ddcw.MYSQL5 else AES.aes_ecb256_decrypt(master_key,data[43:43+32*2])
 			# 这个key_info可能不对, 所以我们计算下CRC32C
-			if struct.unpack('>L',fsp[10390:10390+115][-8:-4])[0] != CRC32C.crc32c(key_info):
+			_crc32_value = struct.unpack('>L',data[-4:])[0] if ddcw.MYSQL5 else struct.unpack('>L',data[-8:-4])[0]
+			if _crc32_value != CRC32C.crc32c(key_info):
 				sys.stderr.write(f"\n keyring file({parser.KEYRING_FILE}) 里面确实包含对应的key({kid}), 但TM不对啊. 估计是指定的新/旧的keyring文件了.\n\n")
 				sys.exit(15)
 			key = key_info[:32]
@@ -126,15 +140,6 @@ if __name__ == '__main__':
 			ddcw.KEY = key
 			ddcw.IV = iv
 			
-	ddcw.MYSQL5 = parser.MYSQL5
-	# 自动判断是否为mysql5环境
-	if os.path.exists(filename[:-4]+'.frm'):
-		AUTOFRM = True
-		FRMFILENAME = filename[:-4]+'.frm'
-		ddcw.MYSQL5 = True
-	else:
-		AUTOFRM = False
-
 	if parser.DEBUG:
 		ddcw.DEBUG = True
 	if parser.SDI_TABLE:
@@ -171,7 +176,7 @@ if __name__ == '__main__':
 		ddcw.IS_PARTITION = True
 		from ibd2sql.innodb_page_sdi import *
 		aa = frm2sdi.MYSQLFRM(FRMFILENAME).get_sdi_page()
-		ddcw.table = sdi(aa).table
+		ddcw.table = sdi(aa,filename=filename).table
 		ddcw._init_table_name()
 
 

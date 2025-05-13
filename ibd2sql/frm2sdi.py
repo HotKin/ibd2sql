@@ -301,7 +301,7 @@ class MYSQLFRM(object):
 		for i in range(self.COLUMNS['fields']):
 			if col_in_screen == self.COLUMNS['fields_per_screen']:
 				screens_read += 1
-				col_in_screen = 1
+				col_in_screen = 2 # issue 54 (1-->2)
 				self.data.read(8)
 				_terminator = self.data.read(1)
 				while _terminator == b' ':
@@ -359,7 +359,9 @@ class MYSQLFRM(object):
 				self.COLUMNS['field'][i]['elements'] = element
 						
 		# 将默认值拆分给每个字段 (字段是否有默认值)
-		self.default_value_null_bitmask = self.DEFAULT_VALUE.read_int((self.COLUMNS['null_fields']+7)//8)
+		# HA_OPTION_PACK_RECORD = 1
+		self.null_bit_pos = 1 if self.FRM_HEADER['create_info_table_option'] & 1 == 0 else 0
+		self.default_value_null_bitmask = self.DEFAULT_VALUE.read_int((self.COLUMNS['null_fields']+7+self.null_bit_pos)//8)
 		for i in range(self.COLUMNS['fields']):
 			if i < self.COLUMNS['fields'] - 1:
 				self.COLUMNS['field'][i]['default_bin'] = self.DEFAULT_VALUE.read(self.COLUMNS['field'][i+1]['metadata']['recpos']-self.COLUMNS['field'][i]['metadata']['recpos'])
@@ -390,7 +392,8 @@ class MYSQLFRM(object):
 		# 字段信息
 		COLUMN = []
 		#self.default_value_null_bitmask = self.DEFAULT_VALUE.read(1)
-		null_bitmask_adds = -1 if self.pack_record == 1 else 0
+		#null_bitmask_adds = -1 if self.pack_record == 1 else 0
+		null_bitmask_adds = 0 if self.FRM_HEADER['create_info_table_option'] & 1 == 0 else -1
 		for i in range(len(self.COLUMNS['field'])):
 			col = self.COLUMNS['field'][i]
 			field_type = COL_TYPE[col['metadata']['field_type']][2]
@@ -428,9 +431,11 @@ class MYSQLFRM(object):
 			#null_bitmask_adds = 0 if self.pack_record == 1 else 1
 			if col['metadata']['pack_flag']&(2**14)>0 or col['metadata']['unireg_type'] == 15:
 				default_value_null = True
-			else:
+			elif col['metadata']['pack_flag']&(2**15)>0:
 				null_bitmask_adds += 1
 				default_value_null = False if self.default_value_null_bitmask&(1<<(null_bitmask_adds)) == 0 else True
+			else:
+				default_value_null = False
 			default_value = b''
 			default_value_utf8 = ''
 			if type_default_size > 0 or field_type in [21,22,23]: # 定长类型的默认值
@@ -522,6 +527,25 @@ class MYSQLFRM(object):
 				column_type_utf8 += f"({char_length})"
 			elif field_type in [1,3,4,9]: # int
 				column_type_utf8 += f"{' unsigned' if pack_flag&1==0 else '' }"
+
+			# TIMESTAMP_OLD_FIELD  = 18
+			# TIMESTAMP_DN_FIELD   = 21 # TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			# TIMESTAMP_UN_FIELD   = 22 # TIMESTAMP DEFAULT <default value> ON UPDATE CURRENT_TIMESTAMP
+			# TIMESTAMP_DNUN_FIELD = 23 # DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+			# None                      # no DEFAULT, no ON UPDATE
+			default_option = ''
+			if col['metadata']['unireg_type'] in [21,23]:
+				default_option = 'CURRENT_TIMESTAMP'
+				default_value_null = False
+			update_option = ''
+			if col['metadata']['unireg_type'] in [22,23]:
+				update_option = 'CURRENT_TIMESTAMP'
+				default_value_null = False
+
+			# char是定长的, 不需要记录长度. 顺便把空格干掉
+			if col['metadata']['field_type'] == 254:
+				default_value_utf8 = col['default_bin'].decode().rstrip()
+
 			COLUMN.append({
 				'name':col['name'],
 				'type':field_type,
@@ -547,7 +571,8 @@ class MYSQLFRM(object):
 				'default_value':default_value,
 				'default_value_utf8_null':default_value_null,
 				'default_value_utf8':default_value_utf8,
-				'default_option':'',
+				'default_option':default_option,
+				'update_option':update_option,
 				'comment':col['comment'],
 				'generation_expression':'',
 				'generation_expression_utf8':'',
@@ -617,7 +642,7 @@ class MYSQLFRM(object):
 			idx = self.KEYS['key'][i]
 			#PK:0 UK:64 K:65 FULL:1025 SPA:129
 			key_type = 3 if idx['name'] != 'PRIMARY' else 1
-			if not idx['flags']^1:
+			if not idx['flags']&1 and key_type != 1:
 				key_type = 2
 			elif idx['flags'] & 1024:
 				key_type = 4

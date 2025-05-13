@@ -93,7 +93,7 @@ class TABLE(object):
 				ddl += f" CHARACTER SET {col['character_set']} COLLATE {col['collation']}"
 			if col['srs_id'] > 0:
 				ddl += f" /*!80003 SRID {col['srs_id']} */"
-			if not col['is_virtual'] and col["default_option"] == "":
+			if not col['is_virtual']:# and col["default_option"] == "":
 				ddl += f"{' NOT' if not col['is_nullable'] else ''} NULL" #nullabel
 			else:
 				#虚拟列 VIRTUAL 
@@ -342,7 +342,9 @@ SDI_PAGE-|---> INFIMUM          13 bytes
 		foreign = []
 		for fgk in dd['dd_object']['foreign_keys']:
 			fkid = f"{','.join([ '`'+x['referenced_column_name']+'`' for x in fgk['elements']])}"
-			foreign.append(f"CONSTRAINT `{fgk['name']}` FOREIGN KEY ({fkid}) REFERENCES `{fgk['referenced_table_schema_name']}`.`{fgk['referenced_table_name']}` ({fkid})")
+			localcol = f"{','.join([ '`'+str(self.table.column[x['column_opx']+1]['name'])+'`' for x in fgk['elements']])}" # issue 57
+			# 1:None 2:RESTRICT 3:CASCADE
+			foreign.append(f"CONSTRAINT `{fgk['name']}` FOREIGN KEY ({localcol}) REFERENCES `{fgk['referenced_table_schema_name']}`.`{fgk['referenced_table_name']}` ({fkid}){' ON DELETE RESTRICT' if fgk['delete_rule'] == 2 else ''}{' ON DELETE CASCADE' if fgk['delete_rule'] == 3 else ''}{' ON UPDATE CASCADE' if fgk['update_rule'] == 3 else ''}{' ON UPDATE RESTRICT' if fgk['update_rule'] == 2 else ''}") # issue 57
 		self.table.foreign = foreign
 
 		#CONSTRAINT CHECK
@@ -375,7 +377,13 @@ SDI_PAGE-|---> INFIMUM          13 bytes
 		else: #不支持其它分区了(就4种: https://dev.mysql.com/doc/refman/8.0/en/partitioning-types.html)
 			pass
 		#self.table.partitions = pt
-		self.table.partitions = pt if dd['dd_object']['subpartition_type'] == 0 else subpartition(dd['dd_object']) # for subpartition
+		#self.table.partitions = pt if dd['dd_object']['subpartition_type'] == 0 else subpartition(dd['dd_object']) # for subpartition
+		if dd['dd_object']['subpartition_type'] == 0 and dd["mysqld_version_id"] > 50744:
+			self.table.partitions = pt
+		elif dd["mysqld_version_id"] > 50744:
+			self.table.partitions = subpartition(dd['dd_object'])
+		elif dd["mysqld_version_id"] <= 50744:
+			self.table.partitions = dd['dd_object']['subpartition_expression']
 
 
 		table_options = {}
@@ -421,7 +429,8 @@ SDI_PAGE-|---> INFIMUM          13 bytes
 		dtrx = int.from_bytes(self.bdata[offset+12:offset+12+6],'big')
 		dundo = int.from_bytes(self.bdata[offset+12+6:offset+12+6+7],'big')
 		dunzip_len,dzip_len = struct.unpack('>LL',self.bdata[offset+33-8:offset+33])
-		if dzip_len + offset > len(self.bdata) or dzip_len > len(self.bdata)//2: # 列太多
+		#if dzip_len + offset > len(self.bdata) or dzip_len > len(self.bdata)//2: # 列太多
+		if self.bdata[offset-5-2:offset-5] == (b'\x14' + struct.pack('>B',128+16384//256)):
 			unzbdata = b''
 			SPACE_ID,PAGENO,BLOB_HEADER,REAL_SIZE = struct.unpack('>3LQ',self.bdata[offset+33:offset+33+20])
 			if REAL_SIZE != dzip_len:
